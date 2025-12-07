@@ -171,11 +171,30 @@
     }
     .pill {
       background: #0b1224;
-      padding: 4px 6px;
+      padding: 6px 8px;
       border-radius: 8px;
       border: 1px solid #1f2937;
       font-size: 12px;
       color: #cbd5e1;
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .pill label {
+      color: #94a3b8;
+      font-weight: 600;
+    }
+    .pill input[type='range'] {
+      accent-color: #22c55e;
+      width: 140px;
+    }
+    .pill input[type='number'] {
+      background: #0f172a;
+      border: 1px solid #1f2937;
+      border-radius: 6px;
+      color: #e2e8f0;
+      padding: 4px 6px;
+      width: 70px;
     }
   </style>
 </head>
@@ -197,8 +216,18 @@
         <button id="trainBtn" class="primary">Start Training</button>
         <button id="stepBtn" class="secondary">Step Episode</button>
         <button id="resetBtn" class="secondary">Reset</button>
-        <span class="pill">Learning rate <span id="lrVal">0.02</span></span>
-        <span class="pill">Gamma <span id="gammaVal">0.99</span></span>
+        <span class="pill">
+          <label for="lrInput">Learning rate</label>
+          <input id="lrInput" type="range" min="0.001" max="0.1" step="0.001" value="0.02" />
+          <input id="lrNumber" type="number" min="0.001" max="0.1" step="0.001" value="0.02" />
+          <span id="lrVal">0.02</span>
+        </span>
+        <span class="pill">
+          <label for="gammaInput">Gamma</label>
+          <input id="gammaInput" type="range" min="0.8" max="0.999" step="0.001" value="0.99" />
+          <input id="gammaNumber" type="number" min="0.8" max="0.999" step="0.001" value="0.99" />
+          <span id="gammaVal">0.99</span>
+        </span>
       </div>
       <canvas id="envCanvas" width="800" height="360"></canvas>
       <div class="metrics" style="margin-top:10px;">
@@ -398,11 +427,50 @@
     const bestSurvivalEl = document.getElementById('bestSurvival');
     const lrValEl = document.getElementById('lrVal');
     const gammaValEl = document.getElementById('gammaVal');
+    const lrInput = document.getElementById('lrInput');
+    const lrNumber = document.getElementById('lrNumber');
+    const gammaInput = document.getElementById('gammaInput');
+    const gammaNumber = document.getElementById('gammaNumber');
 
     let training = false;
     let episode = 0;
     let bestSurvival = 0;
     const history = [];
+
+    function bindHyperparamControls() {
+      const bindPair = (rangeEl, numberEl, displayEl) => {
+        const updateDisplay = (value) => {
+          displayEl.textContent = parseFloat(value).toFixed(3);
+        };
+        const updateFromRange = () => {
+          numberEl.value = rangeEl.value;
+          updateDisplay(rangeEl.value);
+        };
+        const updateFromNumber = () => {
+          const val = clamp(
+            parseFloat(numberEl.value) || parseFloat(rangeEl.min),
+            parseFloat(rangeEl.min),
+            parseFloat(rangeEl.max)
+          );
+          rangeEl.value = val;
+          numberEl.value = val;
+          updateDisplay(val);
+        };
+        rangeEl.addEventListener('input', updateFromRange);
+        numberEl.addEventListener('input', updateFromNumber);
+        updateFromRange();
+      };
+
+      bindPair(lrInput, lrNumber, lrValEl);
+      bindPair(gammaInput, gammaNumber, gammaValEl);
+    }
+
+    function getHyperparams() {
+      return {
+        lr: parseFloat(lrInput.value),
+        gamma: parseFloat(gammaInput.value)
+      };
+    }
 
     function drawEnv() {
       envCtx.clearRect(0, 0, envCanvas.width, envCanvas.height);
@@ -605,7 +673,8 @@
       history.push({ ep: episode, reward: totalReward, steps });
       if (history.length > 100) history.shift();
       bestSurvival = Math.max(bestSurvival, steps);
-      policy.update(trajectory, parseFloat(lrValEl.textContent), parseFloat(gammaValEl.textContent));
+      const { lr, gamma } = getHyperparams();
+      policy.update(trajectory, lr, gamma);
       updateUI(totalReward, steps);
       await new Promise((r) => setTimeout(r, 5));
       requestAnimationFrame(trainingLoop);
@@ -617,7 +686,8 @@
       history.push({ ep: episode, reward: totalReward, steps });
       if (history.length > 100) history.shift();
       bestSurvival = Math.max(bestSurvival, steps);
-      policy.update(trajectory, parseFloat(lrValEl.textContent), parseFloat(gammaValEl.textContent));
+      const { lr, gamma } = getHyperparams();
+      policy.update(trajectory, lr, gamma);
       updateUI(totalReward, steps);
     }
 
@@ -645,6 +715,8 @@
       statusEl.textContent = 'Idle';
       updateUI(0, 0);
     });
+
+    bindHyperparamControls();
 
     // --- Initial draw -----------------------------------------------------
     env.reset();

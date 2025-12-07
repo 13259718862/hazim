@@ -585,6 +585,7 @@
       while (!done && steps < maxSteps) {
         const { action, prob, hidden } = policy.sample(state);
         const { state: nextState, reward, done: terminal } = env.step(action);
+        done = terminal;
         trajectory.states.push(state);
         trajectory.actions.push(action);
         trajectory.rewards.push(reward);

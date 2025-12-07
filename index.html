@@ -196,6 +196,36 @@
       padding: 4px 6px;
       width: 70px;
     }
+    .import-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 2fr 1fr;
+      align-items: center;
+      margin-top: 12px;
+    }
+    .dropzone {
+      padding: 14px;
+      border: 1px dashed #334155;
+      border-radius: 12px;
+      background: #0c1221;
+      color: #cbd5e1;
+      text-align: center;
+      transition: border-color 150ms ease, background 150ms ease;
+    }
+    .dropzone.dragover {
+      border-color: #22c55e;
+      background: #0f172a;
+    }
+    .import-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .status-note {
+      font-size: 12px;
+      color: #94a3b8;
+    }
   </style>
 </head>
 <body>
@@ -265,6 +295,18 @@
           <span style="background:#ef4444"></span> Positive weight
           <span style="background:#3b82f6"></span> Negative weight
         </div>
+        <div class="import-grid">
+          <label class="dropzone" id="dropzone">
+            <strong>Import model</strong><br />
+            Drop a JSON weights file here or click to browse
+            <input type="file" id="fileInput" accept="application/json" style="display:none" />
+          </label>
+          <div class="import-actions">
+            <button id="viewLocalBtn" class="secondary">View Local</button>
+            <button id="viewImportedBtn" class="secondary" disabled>View Imported</button>
+          </div>
+        </div>
+        <div class="status-note" id="importStatus">No imported model loaded.</div>
       </div>
       <div>
         <h2>Hidden Activations</h2>
@@ -431,10 +473,17 @@
     const lrNumber = document.getElementById('lrNumber');
     const gammaInput = document.getElementById('gammaInput');
     const gammaNumber = document.getElementById('gammaNumber');
+    const importStatus = document.getElementById('importStatus');
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const viewLocalBtn = document.getElementById('viewLocalBtn');
+    const viewImportedBtn = document.getElementById('viewImportedBtn');
 
     let training = false;
     let episode = 0;
     let bestSurvival = 0;
+    let importedModel = null;
+    let activeModelSource = 'local';
     const history = [];
 
     function bindHyperparamControls() {
@@ -545,21 +594,46 @@
       });
     }
 
+    function policyToLayeredModel(net = policy) {
+      return {
+        inputSize: net.input,
+        layers: [
+          { weights: net.W1, biases: net.b1 },
+          { weights: net.W2.map((w) => [w]), biases: [net.b2] }
+        ]
+      };
+    }
+
+    function normalizeImportedModel(raw) {
+      if (!raw) return null;
+      if (raw.layers && Number.isFinite(raw.inputSize)) return raw;
+      if (raw.W1 && raw.W2) {
+        return {
+          inputSize: raw.input || raw.W1.length,
+          layers: [
+            { weights: raw.W1, biases: raw.b1 || Array(raw.W1[0]?.length || 0).fill(0) },
+            { weights: (raw.W2 || []).map((w) => [w]), biases: [raw.b2 || 0] }
+          ]
+        };
+      }
+      return null;
+    }
+
+    function getRenderableModel() {
+      if (activeModelSource === 'imported' && importedModel) return importedModel;
+      return policyToLayeredModel();
+    }
+
     function renderNetwork() {
+      const model = getRenderableModel();
+      if (!model) return;
+      const layerSizes = [model.inputSize, ...model.layers.map((l) => l.biases.length || (l.weights[0]?.length ?? 0))];
       const width = networkSvg.clientWidth || 500;
       const height = networkSvg.clientHeight || 240;
       networkSvg.setAttribute('viewBox', `0 0 ${width} ${height}`);
       networkSvg.innerHTML = '';
       const margin = 40;
-      const layerX = [margin, width / 2, width - margin];
-      const inputs = [
-        'x',
-        'ẋ',
-        'θ',
-        'θ̇'
-      ];
-      const hidden = policy.hidden;
-
+      const layerX = layerSizes.map((_, i) => margin + (i / Math.max(1, layerSizes.length - 1)) * (width - margin * 2));
       const nodeY = (count, idx) => margin + (height - margin * 2) * (idx / Math.max(1, count - 1));
       const colorForWeight = (w) => {
         const mag = clamp(Math.abs(w) / 1.5, 0, 1);
@@ -568,32 +642,23 @@
       };
       const thickness = (w) => 1 + clamp(Math.abs(w), 0, 1.5) * 2;
 
-      // Input to hidden edges
-      for (let i = 0; i < inputs.length; i++) {
-        for (let j = 0; j < hidden; j++) {
-          const w = policy.W1[i][j];
-          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-          line.setAttribute('x1', layerX[0]);
-          line.setAttribute('x2', layerX[1]);
-          line.setAttribute('y1', nodeY(inputs.length, i));
-          line.setAttribute('y2', nodeY(hidden, j));
-          line.setAttribute('stroke', colorForWeight(w));
-          line.setAttribute('stroke-width', thickness(w));
-          networkSvg.appendChild(line);
+      model.layers.forEach((layer, layerIdx) => {
+        const prevCount = layerSizes[layerIdx];
+        const nextCount = layerSizes[layerIdx + 1];
+        for (let i = 0; i < prevCount; i++) {
+          for (let j = 0; j < nextCount; j++) {
+            const w = layer.weights?.[i]?.[j] ?? 0;
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', layerX[layerIdx]);
+            line.setAttribute('x2', layerX[layerIdx + 1]);
+            line.setAttribute('y1', nodeY(prevCount, i));
+            line.setAttribute('y2', nodeY(nextCount, j));
+            line.setAttribute('stroke', colorForWeight(w));
+            line.setAttribute('stroke-width', thickness(w));
+            networkSvg.appendChild(line);
+          }
         }
-      }
-      // Hidden to output
-      for (let j = 0; j < hidden; j++) {
-        const w = policy.W2[j];
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('x1', layerX[1]);
-        line.setAttribute('x2', layerX[2]);
-        line.setAttribute('y1', nodeY(hidden, j));
-        line.setAttribute('y2', height / 2);
-        line.setAttribute('stroke', colorForWeight(w));
-        line.setAttribute('stroke-width', thickness(w));
-        networkSvg.appendChild(line);
-      }
+      });
 
       const drawNode = (x, y, label) => {
         const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -615,19 +680,31 @@
         networkSvg.appendChild(g);
       };
 
-      inputs.forEach((l, i) => drawNode(layerX[0], nodeY(inputs.length, i), l));
-      for (let j = 0; j < hidden; j++) drawNode(layerX[1], nodeY(hidden, j), 'h' + (j + 1));
-      drawNode(layerX[2], height / 2, 'π(left)');
+      const defaultInputLabels = ['x', 'ẋ', 'θ', 'θ̇'];
+      for (let i = 0; i < layerSizes[0]; i++) {
+        drawNode(layerX[0], nodeY(layerSizes[0], i), defaultInputLabels[i] || `in${i + 1}`);
+      }
+      for (let layerIdx = 1; layerIdx < layerSizes.length; layerIdx++) {
+        const count = layerSizes[layerIdx];
+        for (let j = 0; j < count; j++) {
+          const label = layerIdx === layerSizes.length - 1 ? `out${j + 1}` : `h${layerIdx}-${j + 1}`;
+          drawNode(layerX[layerIdx], nodeY(count, j), label);
+        }
+      }
     }
 
     function renderSnapshot() {
+      const model = getRenderableModel();
+      if (!model) return;
       const lines = [];
-      lines.push('W1:');
-      policy.W1.forEach((row, i) => lines.push(`  in${i}: [${row.map((v) => v.toFixed(2)).join(', ')}]`));
-      lines.push('W2:');
-      lines.push('  ' + policy.W2.map((v) => v.toFixed(2)).join(', '));
-      lines.push(`b1: [${policy.b1.map((v) => v.toFixed(2)).join(', ')}]`);
-      lines.push(`b2: ${policy.b2.toFixed(3)}`);
+      lines.push(`Input size: ${model.inputSize}`);
+      model.layers.forEach((layer, idx) => {
+        lines.push(`Layer ${idx + 1} (${layer.weights.length}→${layer.weights[0]?.length || 0}) weights:`);
+        layer.weights.forEach((row, r) => {
+          lines.push(`  n${r}: [${row.map((v) => (typeof v === 'number' ? v.toFixed(2) : '0.00')).join(', ')}]`);
+        });
+        lines.push(`  biases: [${(layer.biases || []).map((b) => (typeof b === 'number' ? b.toFixed(2) : '0.00')).join(', ')}]`);
+      });
       weightSnapshot.textContent = lines.join('\n');
     }
 
@@ -716,13 +793,63 @@
       updateUI(0, 0);
     });
 
+    function setActiveModel(source) {
+      activeModelSource = source;
+      viewLocalBtn.classList.toggle('primary', source === 'local');
+      viewImportedBtn.classList.toggle('primary', source === 'imported');
+      renderNetwork();
+      renderSnapshot();
+    }
+
+    function handleModelLoad(model) {
+      importedModel = model;
+      if (importedModel) {
+        importStatus.textContent = `Imported model with ${importedModel.layers.length} layers (input ${importedModel.inputSize}).`;
+        viewImportedBtn.disabled = false;
+      } else {
+        importStatus.textContent = 'Failed to parse model file.';
+        viewImportedBtn.disabled = true;
+      }
+      setActiveModel(importedModel ? 'imported' : 'local');
+    }
+
+    async function parseFile(file) {
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const json = JSON.parse(text);
+        const normalized = normalizeImportedModel(json);
+        handleModelLoad(normalized);
+      } catch (e) {
+        console.error(e);
+        importStatus.textContent = 'Could not read or parse the file.';
+        viewImportedBtn.disabled = true;
+        setActiveModel('local');
+      }
+    }
+
+    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('dragover');
+    });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('dragover');
+      const file = e.dataTransfer?.files?.[0];
+      parseFile(file);
+    });
+    fileInput.addEventListener('change', (e) => parseFile(e.target.files?.[0]));
+    viewLocalBtn.addEventListener('click', () => setActiveModel('local'));
+    viewImportedBtn.addEventListener('click', () => importedModel && setActiveModel('imported'));
+
     bindHyperparamControls();
 
     // --- Initial draw -----------------------------------------------------
     env.reset();
-    renderNetwork();
+    setActiveModel('local');
     renderActivations();
-    renderSnapshot();
     drawEnv();
   </script>
 </body>

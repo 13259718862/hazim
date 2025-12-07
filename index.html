@@ -121,6 +121,13 @@
       border-radius: 10px;
       border: 1px solid #1f2937;
     }
+    .statCanvas {
+      width: 100%;
+      height: 180px;
+      background: #0b1020;
+      border-radius: 10px;
+      border: 1px solid #1f2937;
+    }
     .grid {
       display: grid;
       gap: 12px;
@@ -257,6 +264,20 @@
       <div>
         <h2>Episode Metrics</h2>
         <canvas id="chartCanvas" width="500" height="180"></canvas>
+        <div class="grid two" style="margin-top:10px;">
+          <div>
+            <h2 style="font-size:14px;margin-bottom:6px;">Gradient Norms</h2>
+            <canvas id="gradCanvas" class="statCanvas" width="500" height="180"></canvas>
+          </div>
+          <div>
+            <h2 style="font-size:14px;margin-bottom:6px;">Policy Loss</h2>
+            <canvas id="lossCanvas" class="statCanvas" width="500" height="180"></canvas>
+          </div>
+        </div>
+        <div style="margin-top:10px;">
+          <h2 style="font-size:14px;margin-bottom:6px;">Activation Distribution</h2>
+          <canvas id="activationCanvas" class="statCanvas" width="500" height="160"></canvas>
+        </div>
       </div>
       <div>
         <h2>Policy Network</h2>
@@ -375,6 +396,7 @@
         const gradb1 = Array(this.hidden).fill(0);
         const gradW2 = Array(this.hidden).fill(0);
         let gradb2 = 0;
+        let loss = 0;
 
         for (let t = 0; t < n; t++) {
           const adv = (returns[t] - mean) / std;
@@ -382,6 +404,8 @@
           const action = trajectory.actions[t];
           const hidden = trajectory.hiddens[t];
           const error = (action - prob) * adv; // gradient of log pi
+          const logProb = action === 1 ? Math.log(prob + 1e-8) : Math.log(1 - prob + 1e-8);
+          loss += -logProb * adv;
 
           for (let j = 0; j < this.hidden; j++) {
             gradW2[j] += error * hidden[j];
@@ -396,6 +420,15 @@
         }
 
         const scale = lr / n;
+        const layerGradNorms = {
+          W1: Math.sqrt(
+            gradW1.reduce((acc, row) => acc + row.reduce((a, v) => a + v * v, 0), 0)
+          ),
+          b1: Math.sqrt(gradb1.reduce((a, v) => a + v * v, 0)),
+          W2: Math.sqrt(gradW2.reduce((a, v) => a + v * v, 0)),
+          b2: Math.abs(gradb2)
+        };
+
         for (let i = 0; i < this.input; i++) {
           for (let j = 0; j < this.hidden; j++) this.W1[i][j] += scale * gradW1[i][j];
         }
@@ -404,6 +437,34 @@
           this.W2[j] += scale * gradW2[j];
         }
         this.b2 += scale * gradb2;
+
+        const activations = trajectory.hiddens.flat();
+        const bins = 20;
+        const binCounts = Array(bins).fill(0);
+        const binWidth = 2 / bins;
+        activations.forEach((v) => {
+          const clamped = clamp(v, -1, 1 - 1e-6);
+          const idx = Math.floor((clamped + 1) / binWidth);
+          binCounts[idx] += 1;
+        });
+
+        return {
+          loss: loss / n,
+          gradientNorms: {
+            total: Math.sqrt(
+              layerGradNorms.W1 * layerGradNorms.W1 +
+                layerGradNorms.W2 * layerGradNorms.W2 +
+                layerGradNorms.b1 * layerGradNorms.b1 +
+                layerGradNorms.b2 * layerGradNorms.b2
+            ),
+            layers: layerGradNorms
+          },
+          activationHistogram: {
+            range: [-1, 1],
+            bins,
+            counts: binCounts
+          }
+        };
       }
     }
 
@@ -415,6 +476,12 @@
     const envCtx = envCanvas.getContext('2d');
     const chartCanvas = document.getElementById('chartCanvas');
     const chartCtx = chartCanvas.getContext('2d');
+    const gradCanvas = document.getElementById('gradCanvas');
+    const gradCtx = gradCanvas.getContext('2d');
+    const lossCanvas = document.getElementById('lossCanvas');
+    const lossCtx = lossCanvas.getContext('2d');
+    const activationCanvas = document.getElementById('activationCanvas');
+    const activationCtx = activationCanvas.getContext('2d');
     const networkSvg = document.getElementById('networkSvg');
     const activationBars = document.getElementById('activationBars');
     const weightSnapshot = document.getElementById('weightSnapshot');
@@ -436,6 +503,9 @@
     let episode = 0;
     let bestSurvival = 0;
     const history = [];
+    const gradHistory = [];
+    const lossHistory = [];
+    let lastActivationHistogram = null;
 
     function bindHyperparamControls() {
       const bindPair = (rangeEl, numberEl, displayEl) => {
@@ -531,6 +601,67 @@
         else chartCtx.lineTo(x, y);
       });
       chartCtx.stroke();
+    }
+
+    function drawTrend(canvas, ctx, series, color = '#22c55e') {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#0b1020';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = '#1f2937';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < canvas.width; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, 0);
+        ctx.lineTo(x + 0.5, canvas.height);
+        ctx.stroke();
+      }
+      if (!series.length) return;
+      const maxVal = Math.max(...series.map((p) => p.y), 1e-6);
+      const minVal = Math.min(...series.map((p) => p.y), 0);
+      const xScale = (canvas.width - 40) / Math.max(series.length - 1, 1);
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      series.forEach((p, idx) => {
+        const x = 20 + idx * xScale;
+        const y = canvas.height - 20 - ((p.y - minVal) / (maxVal - minVal + 1e-6)) * (canvas.height - 40);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    function drawGradients() {
+      const series = gradHistory.map((g) => ({ x: g.ep, y: g.total }));
+      drawTrend(gradCanvas, gradCtx, series, '#a855f7');
+    }
+
+    function drawLoss() {
+      const series = lossHistory.map((l) => ({ x: l.ep, y: l.loss }));
+      drawTrend(lossCanvas, lossCtx, series, '#38bdf8');
+    }
+
+    function drawActivationHistogram() {
+      activationCtx.clearRect(0, 0, activationCanvas.width, activationCanvas.height);
+      activationCtx.fillStyle = '#0b1020';
+      activationCtx.fillRect(0, 0, activationCanvas.width, activationCanvas.height);
+      activationCtx.strokeStyle = '#1f2937';
+      activationCtx.lineWidth = 1;
+      for (let x = 0; x < activationCanvas.width; x += 40) {
+        activationCtx.beginPath();
+        activationCtx.moveTo(x + 0.5, 0);
+        activationCtx.lineTo(x + 0.5, activationCanvas.height);
+        activationCtx.stroke();
+      }
+      if (!lastActivationHistogram) return;
+      const { counts, bins } = lastActivationHistogram;
+      const maxCount = Math.max(...counts, 1);
+      const barWidth = activationCanvas.width / bins;
+      for (let i = 0; i < bins; i++) {
+        const h = (counts[i] / maxCount) * (activationCanvas.height - 20);
+        activationCtx.fillStyle = '#22c55e';
+        activationCtx.fillRect(i * barWidth + 2, activationCanvas.height - h - 10, barWidth - 4, h);
+      }
     }
 
     function renderActivations() {
@@ -638,6 +769,9 @@
       lastSurvivalEl.textContent = `${epSteps} steps`;
       bestSurvivalEl.textContent = `${bestSurvival} steps`;
       drawChart();
+      drawGradients();
+      drawLoss();
+      drawActivationHistogram();
       renderActivations();
       renderNetwork();
       renderSnapshot();
@@ -674,7 +808,12 @@
       if (history.length > 100) history.shift();
       bestSurvival = Math.max(bestSurvival, steps);
       const { lr, gamma } = getHyperparams();
-      policy.update(trajectory, lr, gamma);
+      const stats = policy.update(trajectory, lr, gamma);
+      gradHistory.push({ ep: episode, total: stats.gradientNorms.total, layers: stats.gradientNorms.layers });
+      lossHistory.push({ ep: episode, loss: stats.loss });
+      lastActivationHistogram = stats.activationHistogram;
+      if (gradHistory.length > 200) gradHistory.shift();
+      if (lossHistory.length > 200) lossHistory.shift();
       updateUI(totalReward, steps);
       await new Promise((r) => setTimeout(r, 5));
       requestAnimationFrame(trainingLoop);
@@ -687,7 +826,12 @@
       if (history.length > 100) history.shift();
       bestSurvival = Math.max(bestSurvival, steps);
       const { lr, gamma } = getHyperparams();
-      policy.update(trajectory, lr, gamma);
+      const stats = policy.update(trajectory, lr, gamma);
+      gradHistory.push({ ep: episode, total: stats.gradientNorms.total, layers: stats.gradientNorms.layers });
+      lossHistory.push({ ep: episode, loss: stats.loss });
+      lastActivationHistogram = stats.activationHistogram;
+      if (gradHistory.length > 200) gradHistory.shift();
+      if (lossHistory.length > 200) lossHistory.shift();
       updateUI(totalReward, steps);
     }
 
